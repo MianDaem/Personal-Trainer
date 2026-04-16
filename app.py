@@ -366,11 +366,13 @@ def render_auth_screen() -> None:
                 if new_password != confirm_password:
                     st.error("Passwords do not match.")
                 else:
-                    success, message = register_user(new_username, new_password)
+                    success, message, suggestions = register_user(new_username, new_password)
                     if success:
                         st.success(message)
                     else:
                         st.error(message)
+                        if suggestions:
+                            st.info("Try one of these usernames: " + ", ".join(suggestions))
 
 
 def dashboard_tab(exercise_df: pd.DataFrame, targets: dict) -> None:
