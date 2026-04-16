@@ -1,120 +1,47 @@
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
-
-from auth_storage import (
-    MEALS_PATH,
-    MEAL_COLUMNS,
-    PROFILES_PATH,
-    PROGRESS_COLUMNS,
-    PROGRESS_PATH,
-    WORKOUTS_PATH,
-    WORKOUT_COLUMNS,
-    append_record,
-    authenticate_user,
-    clear_user_records,
-    default_profile,
-    ensure_storage,
-    load_profile,
-    load_user_records,
-    normalize_username,
-    register_user,
-    save_profile,
-)
+import streamlit_authenticator as stauth
+import yaml
+from yaml.loader import SafeLoader
 
 
 BASE_DIR = Path(__file__).resolve().parent
-EXERCISE_PATH = BASE_DIR / "megaGymDataset.csv"
-NUTRITION_PATH = BASE_DIR / "nutrition.csv"
-
-st.set_page_config(
-    page_title="Titan Coach",
-    page_icon="T",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+CONFIG_FILE = BASE_DIR / "config.yaml"
+PROFILE_FILE = BASE_DIR / "user_profiles.csv"
+DEFAULT_BUDGET = 50000.0
+ADMIN_ROLE = "admin"
+EXPENSE_COLUMNS = ["Date", "Category", "Item", "Amount"]
+PROFILE_COLUMNS = ["username", "full_name", "email", "phone", "monthly_budget", "currency", "city", "notes"]
+CATEGORY_OPTIONS = ["Food", "Transport", "Bills", "Shopping", "Entertainment", "Health", "Education", "Other"]
 
 
-def init_state() -> None:
-    defaults = {
-        "authenticated": False,
-        "current_user": "",
-        "profile_loaded_for": "",
-        "profile": default_profile(),
-        "workout_log": [],
-        "meal_log": [],
-        "progress_log": [],
-        "selected_plan_exercises": [],
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+def ensure_config() -> dict:
+    if not CONFIG_FILE.exists():
+        initial_config = {
+            "credentials": {"usernames": {}},
+            "cookie": {"expiry_days": 30, "key": "auth_key", "name": "expense_cookie"},
+        }
+        with open(CONFIG_FILE, "w", encoding="utf-8") as file:
+            yaml.dump(initial_config, file, default_flow_style=False)
+    with open(CONFIG_FILE, encoding="utf-8") as file:
+        config = yaml.load(file, Loader=SafeLoader) or {}
+    config.setdefault("credentials", {}).setdefault("usernames", {})
+    config.setdefault("cookie", {"expiry_days": 30, "key": "auth_key", "name": "expense_cookie"})
+    return config
 
 
-def load_user_bundle(username: str) -> None:
-    st.session_state.profile = load_profile(username)
-    st.session_state.workout_log = load_user_records(WORKOUTS_PATH, WORKOUT_COLUMNS, username)
-    st.session_state.meal_log = load_user_records(MEALS_PATH, MEAL_COLUMNS, username)
-    st.session_state.progress_log = load_user_records(PROGRESS_PATH, PROGRESS_COLUMNS, username)
-    st.session_state.profile_loaded_for = username
+def save_config(config: dict) -> None:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as file:
+        yaml.dump(config, file, default_flow_style=False, sort_keys=False)
 
 
-def login_user(username: str) -> None:
-    normalized = normalize_username(username)
-    st.session_state.authenticated = True
-    st.session_state.current_user = normalized
-    load_user_bundle(normalized)
-
-
-def logout_user() -> None:
-    st.session_state.authenticated = False
-    st.session_state.current_user = ""
-    st.session_state.profile_loaded_for = ""
-    st.session_state.profile = default_profile()
-    st.session_state.workout_log = []
-    st.session_state.meal_log = []
-    st.session_state.progress_log = []
-
-
-@st.cache_data(show_spinner=False)
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    if not EXERCISE_PATH.exists():
-        raise FileNotFoundError(f"Missing exercise dataset: {EXERCISE_PATH}")
-    if not NUTRITION_PATH.exists():
-        raise FileNotFoundError(f"Missing nutrition dataset: {NUTRITION_PATH}")
-
-    exercise_df = pd.read_csv(EXERCISE_PATH)
-    nutrition_df = pd.read_csv(NUTRITION_PATH)
-
-    exercise_df.columns = exercise_df.columns.str.strip().str.title()
-    nutrition_df.columns = nutrition_df.columns.str.strip().str.lower()
-
-    exercise_df["Bodypart"] = exercise_df["Bodypart"].fillna("Unknown")
-    exercise_df["Equipment"] = exercise_df["Equipment"].fillna("Body Only")
-    exercise_df["Level"] = exercise_df["Level"].fillna("Beginner")
-    exercise_df["Desc"] = exercise_df["Desc"].fillna("No coaching notes available.")
-    exercise_df["Rating"] = pd.to_numeric(exercise_df["Rating"], errors="coerce").fillna(0.0)
-
-    numeric_food_cols = [
-        "calories",
-        "protein_g",
-        "carbs_g",
-        "fat_g",
-        "fiber_g",
-        "sugar_g",
-        "sodium_mg",
-        "health_score",
-    ]
-    for col in numeric_food_cols:
-        if col in nutrition_df.columns:
-            nutrition_df[col] = pd.to_numeric(nutrition_df[col], errors="coerce").fillna(0.0)
-
-    nutrition_df["food_name"] = nutrition_df["food_name"].fillna("Unknown food")
-    nutrition_df["food_type"] = nutrition_df.get("food_type", pd.Series(dtype="object")).fillna("Other")
-    nutrition_df["health_score"] = nutrition_df.get("health_score", pd.Series(dtype="float")).fillna(0.0)
-    return exercise_df, nutrition_df
+def ensure_profile_storage() -> None:
+    if not PROFILE_FILE.exists():
+        pd.DataFrame(columns=PROFILE_COLUMNS).to_csv(PROFILE_FILE, index=False)
 
 
 def apply_styles() -> None:
@@ -123,67 +50,43 @@ def apply_styles() -> None:
         <style>
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(109, 187, 142, 0.22), transparent 28%),
-                radial-gradient(circle at top right, rgba(245, 158, 11, 0.14), transparent 24%),
-                linear-gradient(180deg, #0b1220 0%, #111827 48%, #162032 100%);
-            color: #e5eef8;
+                radial-gradient(circle at top left, rgba(34, 197, 94, 0.18), transparent 28%),
+                radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 26%),
+                linear-gradient(180deg, #07111f 0%, #0f172a 45%, #122033 100%);
+            color: #e2e8f0;
         }
         [data-testid="stSidebar"] {
-            background: rgba(9, 14, 25, 0.94);
+            background: rgba(5, 12, 24, 0.94);
             border-right: 1px solid rgba(255, 255, 255, 0.08);
         }
-        .hero-card, .glass-card, .plan-card, .auth-card {
-            background: rgba(15, 23, 42, 0.72);
-            border: 1px solid rgba(148, 163, 184, 0.18);
-            border-radius: 20px;
-            padding: 1.2rem 1.1rem;
+        .hero-card, .glass-card {
+            background: rgba(15, 23, 42, 0.75);
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            border-radius: 22px;
+            padding: 1.15rem 1.1rem;
             box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24);
-            backdrop-filter: blur(8px);
         }
-        .hero-card h1, .plan-card h4, .auth-card h2 {
+        .hero-card h1, .hero-card h3 {
             color: #f8fafc;
-            margin-bottom: 0.3rem;
+            margin-bottom: 0.25rem;
         }
-        .muted {
-            color: #9fb0c8;
-            font-size: 0.96rem;
-        }
+        .muted { color: #94a3b8; font-size: 0.96rem; }
         .pill {
-            display: inline-block;
-            background: rgba(125, 211, 167, 0.12);
-            color: #cceedd;
-            border: 1px solid rgba(125, 211, 167, 0.28);
-            padding: 0.2rem 0.65rem;
-            border-radius: 999px;
-            margin-right: 0.35rem;
-            margin-bottom: 0.35rem;
-            font-size: 0.86rem;
+            display: inline-block; padding: 0.24rem 0.7rem; border-radius: 999px;
+            margin-right: 0.35rem; margin-bottom: 0.35rem;
+            background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.25); color: #d1fae5;
+            font-size: 0.84rem;
         }
-        .stButton > button {
-            width: 100%;
-            border-radius: 14px;
-            border: 1px solid rgba(125, 211, 167, 0.35);
-            background: linear-gradient(135deg, #183446 0%, #215c46 100%);
-            color: #f8fafc;
-            font-weight: 600;
-            min-height: 2.9rem;
-        }
-        .stButton > button:hover {
-            border-color: rgba(255, 255, 255, 0.35);
-            color: white;
+        .stButton > button, .stFormSubmitButton > button {
+            width: 100%; min-height: 2.85rem; border-radius: 14px;
+            border: 1px solid rgba(34, 197, 94, 0.28);
+            background: linear-gradient(135deg, #144f3a 0%, #1d6d53 100%);
+            color: #f8fafc; font-weight: 600;
         }
         div[data-testid="stMetric"] {
             background: rgba(15, 23, 42, 0.65);
-            border: 1px solid rgba(148, 163, 184, 0.15);
-            padding: 0.8rem;
-            border-radius: 18px;
-        }
-        .section-title {
-            margin-top: 0.2rem;
-            margin-bottom: 0.75rem;
-            color: #f8fafc;
-            font-weight: 700;
-            letter-spacing: 0.02em;
+            border: 1px solid rgba(148, 163, 184, 0.14);
+            padding: 0.8rem; border-radius: 18px;
         }
         </style>
         """,
@@ -191,502 +94,394 @@ def apply_styles() -> None:
     )
 
 
-def activity_factor(activity: str) -> float:
-    return {
-        "Light": 1.35,
-        "Moderate": 1.55,
-        "High": 1.75,
-        "Athlete": 1.9,
-    }.get(activity, 1.55)
+def get_user_file(username: str) -> Path:
+    return BASE_DIR / f"data_{username}_expenses.csv"
 
 
-def calculate_targets(profile: dict) -> dict:
-    weight = profile["weight_kg"]
-    height = profile["height_cm"]
-    age = profile["age"]
+def ensure_user_file(username: str) -> Path:
+    user_file = get_user_file(username)
+    if not user_file.exists():
+        pd.DataFrame(columns=EXPENSE_COLUMNS).to_csv(user_file, index=False)
+    return user_file
 
-    if profile["sex"] == "Male":
-        bmr = 10 * weight + 6.25 * height - 5 * age + 5
-    else:
-        bmr = 10 * weight + 6.25 * height - 5 * age - 161
 
-    tdee = bmr * activity_factor(profile["activity"])
-    calorie_target = max(
-        1200,
-        tdee + {
-            "Lose fat": -450,
-            "Build muscle": 250,
-            "Maintain": 0,
-            "Improve fitness": -100,
-        }.get(profile["goal"], 0),
-    )
+def read_expenses(username: str) -> pd.DataFrame:
+    df = pd.read_csv(ensure_user_file(username))
+    if df.empty:
+        return pd.DataFrame(columns=EXPENSE_COLUMNS)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+    return df.dropna(subset=["Date"]).copy()
 
-    protein_per_kg = {
-        "Lose fat": 2.0,
-        "Build muscle": 2.2,
-        "Maintain": 1.8,
-        "Improve fitness": 1.8,
-    }.get(profile["goal"], 1.8)
-    fat_grams = weight * 0.8
-    protein_grams = weight * protein_per_kg
-    remaining_calories = max(calorie_target - ((protein_grams * 4) + (fat_grams * 9)), 0)
-    carbs_grams = remaining_calories / 4 if remaining_calories else weight * 2
 
-    return {
-        "bmr": round(bmr),
-        "tdee": round(tdee),
-        "calorie_target": round(calorie_target),
-        "protein_target": round(protein_grams),
-        "carb_target": round(carbs_grams),
-        "fat_target": round(fat_grams),
-        "bmi": round(weight / ((height / 100) ** 2), 1),
-        "water_liters": round(weight * 0.035, 1),
+def save_expenses(username: str, df: pd.DataFrame) -> None:
+    output = df.copy()
+    output["Date"] = pd.to_datetime(output["Date"]).dt.strftime("%Y-%m-%d")
+    output.to_csv(ensure_user_file(username), index=False)
+
+
+def read_profiles() -> pd.DataFrame:
+    ensure_profile_storage()
+    profiles = pd.read_csv(PROFILE_FILE)
+    for column in PROFILE_COLUMNS:
+        if column not in profiles.columns:
+            profiles[column] = ""
+    return profiles[PROFILE_COLUMNS].copy()
+
+
+def save_profiles(df: pd.DataFrame) -> None:
+    output = df.copy()
+    for column in PROFILE_COLUMNS:
+        if column not in output.columns:
+            output[column] = ""
+    output[PROFILE_COLUMNS].to_csv(PROFILE_FILE, index=False)
+
+
+def build_full_name(username: str, config: dict) -> str:
+    details = config["credentials"]["usernames"].get(username, {})
+    full_name = f"{str(details.get('first_name') or '').strip()} {str(details.get('last_name') or '').strip()}".strip()
+    return full_name or username.title()
+
+
+def get_user_profile(username: str, config: dict) -> dict:
+    profiles = read_profiles()
+    record = profiles[profiles["username"] == username]
+    default_profile = {
+        "username": username,
+        "full_name": build_full_name(username, config),
+        "email": config["credentials"]["usernames"].get(username, {}).get("email", ""),
+        "phone": "",
+        "monthly_budget": DEFAULT_BUDGET,
+        "currency": "Rs",
+        "city": "",
+        "notes": "",
     }
+    if record.empty:
+        profiles.loc[len(profiles)] = default_profile
+        save_profiles(profiles)
+        return default_profile
+    row = record.iloc[0].to_dict()
+    row["monthly_budget"] = float(row.get("monthly_budget", DEFAULT_BUDGET) or DEFAULT_BUDGET)
+    row["full_name"] = row.get("full_name") or default_profile["full_name"]
+    row["email"] = row.get("email") or default_profile["email"]
+    row["phone"] = row.get("phone", "")
+    row["currency"] = row.get("currency") or "Rs"
+    row["city"] = row.get("city", "")
+    row["notes"] = row.get("notes", "")
+    return row
 
 
-def session_recommendation(level: str, goal: str) -> tuple[str, str, str]:
-    if goal == "Build muscle":
-        return {
-            "Beginner": ("3", "8-12", "75 sec"),
-            "Intermediate": ("4", "8-10", "90 sec"),
-            "Advanced": ("4-5", "6-10", "120 sec"),
-        }[level]
-    if goal == "Lose fat":
-        return {
-            "Beginner": ("3", "12-15", "45 sec"),
-            "Intermediate": ("3-4", "12-16", "45 sec"),
-            "Advanced": ("4", "15-20", "30-45 sec"),
-        }[level]
-    return {
-        "Beginner": ("2-3", "10-12", "60 sec"),
-        "Intermediate": ("3-4", "10-14", "60-75 sec"),
-        "Advanced": ("4", "8-12", "75 sec"),
-    }[level]
+def save_user_profile(profile: dict) -> None:
+    profiles = read_profiles()
+    profiles = profiles[profiles["username"] != profile["username"]]
+    profiles.loc[len(profiles)] = profile
+    save_profiles(profiles)
 
 
-def build_workout_plan(exercise_df: pd.DataFrame, profile: dict) -> pd.DataFrame:
-    focus_areas = profile["focus_areas"] or exercise_df["Bodypart"].dropna().unique().tolist()[:3]
-    level = profile["experience"]
-    allowed_equipment = set(profile["equipment"])
-
-    filtered = exercise_df[exercise_df["Bodypart"].isin(focus_areas)].copy()
-    if allowed_equipment:
-        filtered = filtered[filtered["Equipment"].isin(allowed_equipment)]
-    if filtered.empty:
-        filtered = exercise_df[exercise_df["Bodypart"].isin(focus_areas)].copy()
-
-    filtered = filtered.sort_values(["Bodypart", "Rating"], ascending=[True, False])
-    plan_rows = []
-    for bodypart in focus_areas:
-        group = filtered[filtered["Bodypart"] == bodypart].head(3)
-        for _, row in group.iterrows():
-            sets, reps, rest = session_recommendation(level, profile["goal"])
-            plan_rows.append(
-                {
-                    "Body Part": row["Bodypart"],
-                    "Exercise": row["Title"],
-                    "Equipment": row["Equipment"],
-                    "Level": row["Level"],
-                    "Sets": sets,
-                    "Reps": reps,
-                    "Rest": rest,
-                    "Coaching": row["Desc"],
-                }
-            )
-    return pd.DataFrame(plan_rows)
+def sync_profile_from_config(username: str, profile: dict, config: dict) -> dict:
+    profile["full_name"] = build_full_name(username, config)
+    profile["email"] = config["credentials"]["usernames"].get(username, {}).get("email", profile.get("email", ""))
+    return profile
 
 
-def summarize_food_log(meal_log: list[dict]) -> dict:
-    totals = {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
-    for item in meal_log:
-        totals["calories"] += item.get("calories", 0.0)
-        totals["protein_g"] += item.get("protein_g", 0.0)
-        totals["carbs_g"] += item.get("carbs_g", 0.0)
-        totals["fat_g"] += item.get("fat_g", 0.0)
-    return totals
+def user_is_admin(username: str, config: dict) -> bool:
+    roles = config["credentials"]["usernames"].get(username, {}).get("roles")
+    if isinstance(roles, list):
+        return ADMIN_ROLE in roles
+    if isinstance(roles, str):
+        return roles.lower() == ADMIN_ROLE
+    return username == "admin"
 
 
-def render_hero(profile: dict, targets: dict) -> None:
-    badges = "".join(f"<span class='pill'>{area}</span>" for area in profile["focus_areas"])
+def get_activity_rows(config: dict) -> pd.DataFrame:
+    rows = []
+    for username in sorted(config["credentials"]["usernames"].keys()):
+        expense_df = read_expenses(username)
+        profile = get_user_profile(username, config)
+        rows.append({
+            "Username": username,
+            "Full Name": profile["full_name"],
+            "Email": profile["email"],
+            "Transactions": len(expense_df),
+            "Total Spent": round(expense_df["Amount"].sum(), 2) if not expense_df.empty else 0.0,
+            "Last Activity": expense_df["Date"].max().strftime("%Y-%m-%d") if not expense_df.empty else "No activity",
+            "Monthly Budget": profile["monthly_budget"],
+            "Admin": "Yes" if user_is_admin(username, config) else "No",
+        })
+    return pd.DataFrame(rows)
+
+
+def delete_user(username: str, config: dict) -> None:
+    config["credentials"]["usernames"].pop(username, None)
+    save_config(config)
+    profiles = read_profiles()
+    save_profiles(profiles[profiles["username"] != username])
+    user_file = get_user_file(username)
+    if user_file.exists():
+        user_file.unlink()
+
+
+def update_user_credentials(username: str, email: str, first_name: str, last_name: str, password: str | None, make_admin: bool, config: dict) -> str:
+    details = config["credentials"]["usernames"][username]
+    details["email"] = email.strip()
+    details["first_name"] = first_name.strip()
+    details["last_name"] = last_name.strip()
+    details["roles"] = [ADMIN_ROLE] if make_admin else None
+    if password:
+        details["password"] = stauth.Hasher([password]).generate()[0]
+    save_config(config)
+    profile = get_user_profile(username, config)
+    profile["full_name"] = build_full_name(username, config)
+    profile["email"] = email.strip()
+    save_user_profile(profile)
+    return "User credentials updated."
+
+
+def render_auth_screen(authenticator, config: dict) -> None:
+    st.title("Expense Command Center")
+    st.caption("Track spending, manage monthly budget, and review insights from one place.")
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+    with tab2:
+        try:
+            before_count = len(config["credentials"]["usernames"])
+            if authenticator.register_user(location="main"):
+                after_count = len(config["credentials"]["usernames"])
+                if after_count > before_count:
+                    latest_username = sorted(config["credentials"]["usernames"].keys())[-1]
+                    config["credentials"]["usernames"][latest_username]["roles"] = None
+                    save_config(config)
+                    st.success("Registration successful. Please switch to Login.")
+                else:
+                    st.info("Fill out the form to create a new account.")
+        except Exception as exc:
+            if "already exists" in str(exc).lower():
+                st.error("This username is already taken. Please choose another one.")
+            else:
+                st.error(f"Registration Error: {exc}")
+    with tab1:
+        authenticator.login(location="main")
+        if st.session_state.get("authentication_status") is False:
+            st.error("Username/password is incorrect")
+        elif st.session_state.get("authentication_status") is None:
+            st.info("Please login or register to manage your expenses.")
+
+
+def render_sidebar(username: str, name: str, authenticator, profile: dict):
+    st.sidebar.title(f"Welcome, {name}")
+    st.sidebar.caption(f"Account: {username}")
+    st.sidebar.markdown("---")
+    with st.sidebar.form("expense_form"):
+        exp_date = st.date_input("Date", date.today())
+        category = st.selectbox("Category", CATEGORY_OPTIONS)
+        item = st.text_input("Item Name")
+        amount = st.number_input("Amount", min_value=0.0, step=50.0)
+        submitted = st.form_submit_button("Save Expense")
+    if submitted:
+        if item.strip() and amount > 0:
+            return exp_date, category, item.strip(), float(amount)
+        st.sidebar.error("Please enter a valid item and amount greater than zero.")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Profile & Budget")
+    with st.sidebar.form("profile_form"):
+        full_name = st.text_input("Full Name", value=profile["full_name"])
+        phone = st.text_input("Phone", value=profile["phone"])
+        city = st.text_input("City", value=profile["city"])
+        monthly_budget = st.number_input("Monthly Budget", min_value=0.0, value=float(profile["monthly_budget"]), step=500.0)
+        currency = st.text_input("Currency", value=profile["currency"])
+        notes = st.text_area("Notes", value=profile["notes"])
+        save_profile_clicked = st.form_submit_button("Save Personal Details")
+    if save_profile_clicked:
+        profile["full_name"] = full_name.strip() or profile["full_name"]
+        profile["phone"] = phone.strip()
+        profile["city"] = city.strip()
+        profile["monthly_budget"] = float(monthly_budget)
+        profile["currency"] = currency.strip() or "Rs"
+        profile["notes"] = notes.strip()
+        save_user_profile(profile)
+        st.sidebar.success("Personal details updated.")
+
+    st.sidebar.markdown("---")
+    authenticator.logout("Logout", "sidebar")
+    return None, "", "", 0.0
+
+
+def render_filters(df: pd.DataFrame):
+    st.sidebar.markdown("---")
+    st.sidebar.header("Filter Analytics")
+    view_option = st.sidebar.radio("Select Scope:", ["All-Time", "Current Month", "Custom Date Range"])
+    display_df = df.copy()
+    title_text = "All-Time Statistics"
+    if view_option == "Current Month":
+        current_month = date.today().strftime("%Y-%m")
+        display_df = df[df["Date"].dt.strftime("%Y-%m") == current_month]
+        title_text = f"Stats for {date.today().strftime('%B %Y')}"
+    elif view_option == "Custom Date Range":
+        today = date.today()
+        start_default = today - pd.Timedelta(days=7)
+        date_range = st.sidebar.date_input("Select Range", value=(start_default, today), max_value=today)
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+            display_df = df[(df["Date"].dt.date >= start_date) & (df["Date"].dt.date <= end_date)]
+            title_text = f"Stats from {start_date} to {end_date}"
+        else:
+            st.info("Please select both a start and end date in the sidebar.")
+            st.stop()
+    return display_df, title_text
+
+
+def render_dashboard(df: pd.DataFrame, display_df: pd.DataFrame, profile: dict, name: str) -> None:
+    currency = profile["currency"] or "Rs"
     st.markdown(
         f"""
         <div class="hero-card">
-            <h1>Titan Coach</h1>
-            <p class="muted">
-                Personal trainer mode is active for <strong>{profile["name"]}</strong>.
-                Goal: <strong>{profile["goal"]}</strong> | Experience: <strong>{profile["experience"]}</strong> |
-                Training days: <strong>{profile["days_per_week"]}</strong> / week
-            </p>
-            <div>{badges}</div>
-            <p class="muted" style="margin-top: 0.75rem;">
-                Daily target: <strong>{targets["calorie_target"]} kcal</strong>,
-                <strong>{targets["protein_target"]} g protein</strong>,
-                <strong>{targets["water_liters"]} L water</strong>.
-            </p>
+            <h1>{name}'s Expense Dashboard</h1>
+            <p class="muted">Monthly budget: <strong>{currency}{profile['monthly_budget']:,.0f}</strong> | City: <strong>{profile['city'] or 'Not set'}</strong></p>
+            <span class="pill">Budget-aware tracking</span><span class="pill">Personal details</span><span class="pill">Live analytics</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    total = display_df["Amount"].sum() if not display_df.empty else 0.0
+    avg_transaction = display_df["Amount"].mean() if not display_df.empty else 0.0
+    month_df = df[df["Date"].dt.strftime("%Y-%m") == date.today().strftime("%Y-%m")]
+    monthly_spent = month_df["Amount"].sum() if not month_df.empty else 0.0
+    remaining_budget = max(float(profile["monthly_budget"]) - monthly_spent, 0.0)
 
-def render_auth_screen() -> None:
-    left, center, right = st.columns([1, 1.2, 1])
-    with center:
-        st.markdown(
-            """
-            <div class="auth-card">
-                <h2>Titan Coach Login</h2>
-                <p class="muted">Each user gets a separate account, separate dashboard, and separate CSV saved data for profile, goals, workouts, meals, and progress.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
-
-        with login_tab:
-            with st.form("login_form"):
-                username = st.text_input("Username")
-                password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Log In")
-            if submitted:
-                if authenticate_user(username, password):
-                    login_user(username)
-                    st.success("Login successful.")
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password.")
-
-        with signup_tab:
-            with st.form("signup_form"):
-                new_username = st.text_input("New username")
-                new_password = st.text_input("New password", type="password")
-                confirm_password = st.text_input("Confirm password", type="password")
-                submitted = st.form_submit_button("Create Account")
-            if submitted:
-                if new_password != confirm_password:
-                    st.error("Passwords do not match.")
-                else:
-                    success, message, suggestions = register_user(new_username, new_password)
-                    if success:
-                        st.success(message)
-                    else:
-                        st.error(message)
-                        if suggestions:
-                            st.info("Try one of these usernames: " + ", ".join(suggestions))
-
-
-def dashboard_tab(exercise_df: pd.DataFrame, targets: dict) -> None:
-    profile = st.session_state.profile
-    render_hero(profile, targets)
-
-    workout_df = pd.DataFrame(st.session_state.workout_log)
-    meal_totals = summarize_food_log(st.session_state.meal_log)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("BMI", targets["bmi"])
-    c2.metric("TDEE", f'{targets["tdee"]} kcal')
-    c3.metric("Workouts logged", len(workout_df))
-    c4.metric("Calories eaten", f'{round(meal_totals["calories"])} kcal')
-
-    adherence = round((meal_totals["protein_g"] / max(targets["protein_target"], 1)) * 100)
-    s1, s2, s3 = st.columns(3)
-    s1.metric("Protein target hit", f"{min(adherence, 999)}%")
-    s2.metric("Weekly sessions goal", f"{min(len(workout_df), profile['days_per_week'])} / {profile['days_per_week']}")
-    s3.metric("User", st.session_state.current_user)
-
-    left, right = st.columns([1.25, 1])
-    with left:
-        st.markdown("<h3 class='section-title'>This Week's Focus</h3>", unsafe_allow_html=True)
-        plan_df = build_workout_plan(exercise_df, profile)
-        if plan_df.empty:
-            st.warning("No exercises matched the current profile filters. Adjust equipment or focus areas in the sidebar.")
-        else:
-            st.dataframe(plan_df[["Body Part", "Exercise", "Sets", "Reps", "Rest"]], use_container_width=True, hide_index=True)
-
-    with right:
-        st.markdown("<h3 class='section-title'>Coach Notes</h3>", unsafe_allow_html=True)
-        workload_tip = (
-            "Add one more set to the main movement if the final set feels easier than RPE 7."
-            if profile["experience"] != "Beginner"
-            else "Stay one or two reps away from failure and build consistency before adding load."
-        )
-        meal_tip = (
-            "Split protein across 3 to 4 meals to make the target easier to hit."
-            if targets["protein_target"] >= 130
-            else "Anchor each meal with protein first, then add carbs around training."
-        )
-        st.markdown(
-            f"""
-            <div class="hero-card">
-                <p><strong>Training:</strong> {workload_tip}</p>
-                <p><strong>Nutrition:</strong> {meal_tip}</p>
-                <p><strong>Recovery:</strong> Aim for 7 to 9 hours of sleep and at least {targets["water_liters"]} L water.</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    if not workout_df.empty:
-        history = workout_df.copy()
-        history["date"] = pd.to_datetime(history["date"])
-        daily_volume = history.groupby(history["date"].dt.date)["volume"].sum().reset_index()
-        daily_volume.columns = ["Date", "Volume"]
-        st.markdown("<h3 class='section-title'>Progress Trend</h3>", unsafe_allow_html=True)
-        st.line_chart(daily_volume.set_index("Date"))
-
-
-def workouts_tab(exercise_df: pd.DataFrame) -> None:
-    profile = st.session_state.profile
-    st.markdown("<h3 class='section-title'>Workout Builder</h3>", unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns(3)
-    body_parts = sorted(exercise_df["Bodypart"].dropna().unique().tolist())
-    equipment_options = sorted(exercise_df["Equipment"].dropna().unique().tolist())
-    chosen_body_parts = col1.multiselect("Target muscles", body_parts, default=profile["focus_areas"])
-    chosen_equipment = col2.multiselect("Equipment", equipment_options, default=profile["equipment"])
-    chosen_level = col3.selectbox("Difficulty", ["Beginner", "Intermediate", "Advanced"], index=["Beginner", "Intermediate", "Advanced"].index(profile["experience"]))
-
-    filtered = exercise_df.copy()
-    if chosen_body_parts:
-        filtered = filtered[filtered["Bodypart"].isin(chosen_body_parts)]
-    if chosen_equipment:
-        filtered = filtered[filtered["Equipment"].isin(chosen_equipment)]
-    filtered = filtered.sort_values(["Rating", "Title"], ascending=[False, True])
-
-    sets, reps, rest = session_recommendation(chosen_level, profile["goal"])
-    st.caption(f"Coach prescription: {sets} sets | {reps} reps | {rest} rest")
-
-    if filtered.empty:
-        st.info("No matching exercises found. Try expanding the equipment or body part filters.")
-        return
-
-    for idx, row in filtered.head(12).iterrows():
-        st.markdown(
-            f"""
-            <div class="plan-card">
-                <h4>{row["Title"]}</h4>
-                <p class="muted">{row["Bodypart"]} | {row["Equipment"]} | {row["Level"]}</p>
-                <p>{row["Desc"]}</p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        c1, c2, c3, c4 = st.columns(4)
-        performed_sets = c1.number_input("Sets", min_value=1, max_value=10, value=int(str(sets).split("-")[0]), key=f"sets_{idx}")
-        performed_reps = c2.text_input("Reps", value=reps, key=f"reps_{idx}")
-        load_used = c3.number_input("Weight (kg)", min_value=0.0, value=0.0, step=2.5, key=f"load_{idx}")
-        duration = c4.number_input("Minutes", min_value=5, max_value=180, value=20, key=f"mins_{idx}")
-        if st.button(f"Log {row['Title']}", key=f"log_{idx}"):
-            rep_floor = int(str(performed_reps).split("-")[0]) if str(performed_reps).split("-")[0].isdigit() else 10
-            volume = performed_sets * max(rep_floor, 1) * max(load_used if load_used else 1, 1)
-            record = {
-                "username": st.session_state.current_user,
-                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "exercise": row["Title"],
-                "bodypart": row["Bodypart"],
-                "sets": performed_sets,
-                "reps": performed_reps,
-                "load_kg": load_used,
-                "duration_min": duration,
-                "volume": round(volume, 1),
-            }
-            st.session_state.workout_log.append(record)
-            append_record(WORKOUTS_PATH, WORKOUT_COLUMNS, record)
-            st.success(f"{row['Title']} added to your training history.")
-
-
-def nutrition_tab(nutrition_df: pd.DataFrame, targets: dict) -> None:
-    st.markdown("<h3 class='section-title'>Nutrition Coach</h3>", unsafe_allow_html=True)
-
-    meal_totals = summarize_food_log(st.session_state.meal_log)
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Calories", f"{round(meal_totals['calories'])} / {targets['calorie_target']}")
-    m2.metric("Protein", f"{round(meal_totals['protein_g'])} / {targets['protein_target']} g")
-    m3.metric("Carbs", f"{round(meal_totals['carbs_g'])} / {targets['carb_target']} g")
-    m4.metric("Fat", f"{round(meal_totals['fat_g'])} / {targets['fat_target']} g")
+    m1.metric("Total Spent", f"{currency}{total:,.2f}")
+    m2.metric("Average Transaction", f"{currency}{avg_transaction:,.2f}")
+    m3.metric("This Month Spent", f"{currency}{monthly_spent:,.2f}")
+    m4.metric("Remaining Budget", f"{currency}{remaining_budget:,.2f}")
 
-    search_term = st.text_input("Search food", value="chicken")
-    food_types = ["All"] + sorted(nutrition_df["food_type"].dropna().unique().tolist())
-    selected_type = st.selectbox("Food type", food_types)
+    col1, col2 = st.columns(2)
+    with col1:
+        if not display_df.empty:
+            st.plotly_chart(px.pie(display_df, values="Amount", names="Category", hole=0.35, title="Spending by Category"), use_container_width=True)
+        else:
+            st.info("No data available for this filter.")
+    with col2:
+        budget_frame = pd.DataFrame({"Type": ["Spent Budget", "Remaining Budget"], "Amount": [monthly_spent, remaining_budget]})
+        st.plotly_chart(px.pie(budget_frame, values="Amount", names="Type", hole=0.45, title="Monthly Budget Status"), use_container_width=True)
 
-    matches = nutrition_df[nutrition_df["food_name"].str.contains(search_term, case=False, na=False)].copy()
-    if selected_type != "All":
-        matches = matches[matches["food_type"] == selected_type]
-    matches = matches.sort_values(["health_score", "protein_g"], ascending=[False, False]).head(25)
-
-    if matches.empty:
-        st.info("No foods matched the current search.")
-        return
-
-    st.dataframe(
-        matches[["food_name", "calories", "protein_g", "carbs_g", "fat_g", "fiber_g", "health_score"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    choice = st.selectbox("Select food", matches["food_name"].tolist())
-    grams = st.slider("Portion size (grams)", min_value=50, max_value=500, value=150, step=25)
-    picked = matches[matches["food_name"] == choice].iloc[0]
-    portion_scale = grams / 100
-    calories = picked["calories"] * portion_scale
-    protein = picked["protein_g"] * portion_scale
-    carbs = picked["carbs_g"] * portion_scale
-    fat = picked["fat_g"] * portion_scale
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Calories", f"{calories:.0f} kcal")
-    c2.metric("Protein", f"{protein:.1f} g")
-    c3.metric("Carbs", f"{carbs:.1f} g")
-    c4.metric("Fat", f"{fat:.1f} g")
-
-    if st.button("Add meal to daily log"):
-        record = {
-            "username": st.session_state.current_user,
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "food_name": choice,
-            "grams": grams,
-            "calories": round(calories, 1),
-            "protein_g": round(protein, 1),
-            "carbs_g": round(carbs, 1),
-            "fat_g": round(fat, 1),
-        }
-        st.session_state.meal_log.append(record)
-        append_record(MEALS_PATH, MEAL_COLUMNS, record)
-        st.success(f"{choice} added to your meal log.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if not display_df.empty:
+            daily_trend = display_df.groupby("Date")["Amount"].sum().reset_index()
+            st.plotly_chart(px.area(daily_trend, x="Date", y="Amount", title="Daily Spending Trend"), use_container_width=True)
+    with c2:
+        if not display_df.empty:
+            top_items = display_df.groupby("Item")["Amount"].sum().sort_values(ascending=False).head(7).reset_index()
+            st.plotly_chart(px.bar(top_items, x="Amount", y="Item", orientation="h", title="Top Expense Items"), use_container_width=True)
 
 
-def progress_tab(targets: dict) -> None:
-    st.markdown("<h3 class='section-title'>Progress Tracker</h3>", unsafe_allow_html=True)
-    profile = st.session_state.profile
-    workout_df = pd.DataFrame(st.session_state.workout_log)
-    meal_df = pd.DataFrame(st.session_state.meal_log)
-
-    with st.form("progress_form", clear_on_submit=False):
-        c1, c2, c3 = st.columns(3)
-        weight = c1.number_input("Current weight (kg)", min_value=25.0, max_value=250.0, value=float(profile["weight_kg"]), step=0.5)
-        waist = c2.number_input("Waist (cm)", min_value=40.0, max_value=200.0, value=82.0, step=0.5)
-        energy = c3.slider("Energy level", min_value=1, max_value=10, value=7)
-        notes = st.text_area("Weekly notes", placeholder="Examples: sleep improved, bench felt stronger, appetite low...")
-        submitted = st.form_submit_button("Save progress check-in")
-
-    if submitted:
-        st.session_state.profile["weight_kg"] = weight
-        save_profile(st.session_state.current_user, st.session_state.profile)
-        record = {
-            "username": st.session_state.current_user,
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "weight_kg": weight,
-            "waist_cm": waist,
-            "energy": energy,
-            "notes": notes,
-        }
-        st.session_state.progress_log.append(record)
-        append_record(PROGRESS_PATH, PROGRESS_COLUMNS, record)
-        st.success("Progress check-in saved.")
-
-    p1, p2, p3 = st.columns(3)
-    p1.metric("Target calories", f"{targets['calorie_target']} kcal")
-    p2.metric("Target protein", f"{targets['protein_target']} g")
-    p3.metric("Water target", f"{targets['water_liters']} L")
-
-    if not workout_df.empty:
-        st.markdown("<h4 class='section-title'>Workout History</h4>", unsafe_allow_html=True)
-        st.dataframe(workout_df.sort_values("date", ascending=False), use_container_width=True, hide_index=True)
-
-    if not meal_df.empty:
-        st.markdown("<h4 class='section-title'>Meal History</h4>", unsafe_allow_html=True)
-        st.dataframe(meal_df.sort_values("date", ascending=False), use_container_width=True, hide_index=True)
-
-    progress_df = pd.DataFrame(st.session_state.progress_log)
-    if not progress_df.empty:
-        trend = progress_df.copy()
-        trend["date"] = pd.to_datetime(trend["date"])
-        st.markdown("<h4 class='section-title'>Bodyweight Trend</h4>", unsafe_allow_html=True)
-        st.line_chart(trend.set_index("date")[["weight_kg", "waist_cm"]])
+def render_history(display_df: pd.DataFrame, df: pd.DataFrame, username: str, profile: dict) -> None:
+    currency = profile["currency"] or "Rs"
+    st.markdown("---")
+    st.subheader("Transaction History")
+    if not display_df.empty:
+        st.dataframe(display_df.sort_values("Date", ascending=False), use_container_width=True, column_config={
+            "Amount": st.column_config.NumberColumn(format=f"{currency}%.2f"),
+            "Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+        })
     else:
-        st.info("Add your first progress check-in to start visual tracking.")
+        st.info("No transactions found for the selected filter.")
+
+    with st.expander("Manage Filtered Data"):
+        left, right = st.columns(2)
+        with left:
+            if not display_df.empty:
+                delete_options = {f"{idx}: {row['Item']} ({currency}{row['Amount']:.2f})": idx for idx, row in display_df.iterrows()}
+                selected = st.selectbox("Select entry", list(delete_options.keys()))
+                if st.button("Confirm Delete"):
+                    save_expenses(username, df.drop(delete_options[selected]))
+                    st.success("Entry removed.")
+                    st.rerun()
+        with right:
+            confirm = st.checkbox("Enable filtered reset")
+            if st.button("Clear Filtered Data", disabled=not confirm):
+                save_expenses(username, df[~df.index.isin(display_df.index)])
+                st.warning("Filtered records cleared.")
+                st.rerun()
 
 
-def sidebar_profile(exercise_df: pd.DataFrame) -> None:
-    with st.sidebar:
-        st.markdown(f"## {st.session_state.current_user}'s Dashboard")
-        st.caption("Profile changes can be saved to your own CSV data.")
-        profile = st.session_state.profile
-        profile["name"] = st.text_input("Name", value=profile["name"])
-        profile["age"] = st.number_input("Age", min_value=14, max_value=80, value=int(profile["age"]))
-        profile["sex"] = st.selectbox("Sex", ["Male", "Female"], index=0 if profile["sex"] == "Male" else 1)
-        profile["height_cm"] = st.number_input("Height (cm)", min_value=120, max_value=230, value=int(profile["height_cm"]))
-        profile["weight_kg"] = st.number_input("Weight (kg)", min_value=30.0, max_value=250.0, value=float(profile["weight_kg"]), step=0.5)
-        profile["goal"] = st.selectbox("Goal", ["Lose fat", "Build muscle", "Maintain", "Improve fitness"], index=["Lose fat", "Build muscle", "Maintain", "Improve fitness"].index(profile["goal"]))
-        profile["activity"] = st.selectbox("Lifestyle activity", ["Light", "Moderate", "High", "Athlete"], index=["Light", "Moderate", "High", "Athlete"].index(profile["activity"]))
-        profile["experience"] = st.selectbox("Training experience", ["Beginner", "Intermediate", "Advanced"], index=["Beginner", "Intermediate", "Advanced"].index(profile["experience"]))
-        profile["days_per_week"] = st.slider("Workout days / week", min_value=2, max_value=7, value=int(profile["days_per_week"]))
-
-        equipment_options = sorted(exercise_df["Equipment"].dropna().unique().tolist())
-        body_parts = sorted(exercise_df["Bodypart"].dropna().unique().tolist())
-
-        valid_equipment_defaults = [item for item in profile["equipment"] if item in equipment_options]
-        valid_focus_defaults = [item for item in profile["focus_areas"] if item in body_parts]
-
-        if not valid_equipment_defaults:
-            valid_equipment_defaults = equipment_options[:3]
-        if not valid_focus_defaults:
-            valid_focus_defaults = body_parts[:3]
-
-        profile["equipment"] = st.multiselect(
-            "Available equipment",
-            equipment_options,
-            default=valid_equipment_defaults,
-        )
-        profile["focus_areas"] = st.multiselect(
-            "Priority muscle groups",
-            body_parts,
-            default=valid_focus_defaults,
-        )
-
-        if st.button("Save profile"):
-            save_profile(st.session_state.current_user, profile)
-            st.success("Profile saved.")
-
-        if st.button("Reset all logs"):
-            st.session_state.workout_log = []
-            st.session_state.meal_log = []
-            st.session_state.progress_log = []
-            clear_user_records(WORKOUTS_PATH, WORKOUT_COLUMNS, st.session_state.current_user)
-            clear_user_records(MEALS_PATH, MEAL_COLUMNS, st.session_state.current_user)
-            clear_user_records(PROGRESS_PATH, PROGRESS_COLUMNS, st.session_state.current_user)
-            st.success("Training, nutrition, and progress logs cleared for this user.")
-
-        if st.button("Log out"):
-            logout_user()
+def render_admin_panel(config: dict, current_username: str) -> None:
+    st.markdown("---")
+    st.subheader("Admin Panel")
+    activity_df = get_activity_rows(config)
+    if not activity_df.empty:
+        st.dataframe(activity_df, use_container_width=True, hide_index=True)
+    usernames = sorted(config["credentials"]["usernames"].keys())
+    selected_user = st.selectbox("Manage user", usernames)
+    details = config["credentials"]["usernames"][selected_user]
+    profile = get_user_profile(selected_user, config)
+    tab1, tab2, tab3 = st.tabs(["Activity", "Update Credentials", "Delete User"])
+    with tab1:
+        user_expenses = read_expenses(selected_user)
+        if user_expenses.empty:
+            st.info("This user has no expense activity yet.")
+        else:
+            st.dataframe(user_expenses.sort_values("Date", ascending=False).head(20), use_container_width=True, hide_index=True)
+    with tab2:
+        with st.form("admin_update_form"):
+            email = st.text_input("Email", value=details.get("email", ""))
+            first_name = st.text_input("First Name", value=details.get("first_name", ""))
+            last_name = st.text_input("Last Name", value=details.get("last_name", ""))
+            new_password = st.text_input("New Password", type="password", placeholder="Leave blank to keep current password")
+            make_admin = st.checkbox("Grant admin access", value=user_is_admin(selected_user, config))
+            submitted = st.form_submit_button("Update User")
+        if submitted:
+            st.success(update_user_credentials(selected_user, email, first_name, last_name, new_password or None, make_admin, config))
             st.rerun()
+        st.markdown(f"<div class='glass-card'><h3>Stored Profile</h3><p class='muted'>Budget: {profile['currency']}{float(profile['monthly_budget']):,.0f}</p><p class='muted'>Phone: {profile['phone'] or 'Not set'} | City: {profile['city'] or 'Not set'}</p></div>", unsafe_allow_html=True)
+    with tab3:
+        if selected_user == current_username:
+            st.warning("You cannot delete your own active account from this session.")
+        else:
+            confirm_delete = st.checkbox(f"I understand deleting `{selected_user}` removes their account and expense file.")
+            if st.button("Delete User", disabled=not confirm_delete):
+                delete_user(selected_user, config)
+                st.success("User deleted successfully.")
+                st.rerun()
 
 
 def main() -> None:
-    init_state()
-    ensure_storage()
+    config = ensure_config()
+    ensure_profile_storage()
+    st.set_page_config(page_title="Personal Spend Tracker", layout="wide")
     apply_styles()
-    exercise_df, nutrition_df = load_data()
+    authenticator = stauth.Authenticate(config["credentials"], config["cookie"]["name"], config["cookie"]["key"], config["cookie"]["expiry_days"])
 
-    if not st.session_state.authenticated:
-        render_auth_screen()
+    if not st.session_state.get("authentication_status"):
+        render_auth_screen(authenticator, config)
         return
 
-    if st.session_state.profile_loaded_for != st.session_state.current_user:
-        load_user_bundle(st.session_state.current_user)
+    username = st.session_state["username"]
+    profile = sync_profile_from_config(username, get_user_profile(username, config), config)
+    save_user_profile(profile)
+    name = profile["full_name"]
 
-    sidebar_profile(exercise_df)
-    targets = calculate_targets(st.session_state.profile)
+    exp_date, category, item, amount = render_sidebar(username, name, authenticator, profile)
+    if item and amount > 0:
+        df = read_expenses(username)
+        df = pd.concat([df, pd.DataFrame([[exp_date, category, item, amount]], columns=EXPENSE_COLUMNS)], ignore_index=True)
+        save_expenses(username, df)
+        st.sidebar.success("Expense recorded.")
+        st.rerun()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Workouts", "Nutrition", "Progress"])
-    with tab1:
-        dashboard_tab(exercise_df, targets)
-    with tab2:
-        workouts_tab(exercise_df)
-    with tab3:
-        nutrition_tab(nutrition_df, targets)
-    with tab4:
-        progress_tab(targets)
+    df = read_expenses(username)
+    if df.empty:
+        st.title(f"Hello {name}")
+        st.info("Your expense history is empty. Add your first expense from the sidebar.")
+    else:
+        display_df, title_text = render_filters(df)
+        st.subheader(title_text)
+        render_dashboard(df, display_df, profile, name)
+        render_history(display_df, df, username, profile)
+
+    if user_is_admin(username, config):
+        render_admin_panel(config, username)
 
 
 if __name__ == "__main__":
